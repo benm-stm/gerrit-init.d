@@ -1,0 +1,190 @@
+### INIT INFO
+# Provides:          gerrit
+# Description:       Web based code review and project management for Git based projects.
+#                    Bound to STMicroelectronics ALM (aka Codex).
+###
+
+# Get function from functions library
+. /etc/init.d/functions
+
+SERVICE='/sbin/service'
+SU=/bin/su
+
+NAME="gerrit"
+DESC="Gerrit Code Review"
+SCRIPTNAME=/etc/init.d/$NAME
+
+# Could be moved to a configuration file in /etc/default/gerrit by the maintainer
+GERRIT_DATADIR=/home/gerritadm
+GERRIT_SITE=${GERRIT_DATADIR}/gerrit_site
+GERRIT_SH=${GERRIT_SITE}/bin/gerrit.sh
+GERRIT_USER=gerritadm
+
+PIDFILE=${GERRIT_SITE}/logs/$NAME.pid
+
+TMPFILE=${GERRIT_SITE}/tmp
+
+check_service_is_stopped() {
+    if ps ax | grep -v grep | grep "$1" > /dev/null
+        then  control_service $1 stop;
+    else
+        echo "$1 service stopped"
+fi
+}
+
+check_service_is_running() {
+        if ps ax | grep -v grep | grep "$1" > /dev/null
+        then  echo "$1 service running"
+    else
+    control_service $1 start;
+    fi
+}
+
+# Get the status of the daemon process
+# @todo factorize with check_service_is_running / check_service_is_stopped
+get_daemon_status() {
+    if [ -f ${PIDFILE} ];
+        then
+        rc_pid=`cat ${PIDFILE}`
+        procname=`ps -o ucomm= ${rc_pid}`
+    fi
+
+    [ -z ${procname} ] && return 1 || return 0
+}
+
+control_service() {
+    local service="$1"
+    local command="$2"
+    if [ -x $SERVICE ]; then
+        $SERVICE $service $command
+    else
+        if [ -x /etc/init.d/$service ]; then
+            /etc/init.d/$service $command
+        else
+            echo "ERROR: found no way to control service $service" >&2
+            exit 1
+        fi
+    fi
+}
+
+enable_service() {
+    check_service_is_running $1
+    if [[ $? -ne 0 ]];
+        then die "$1 service can not be launched";
+    fi;
+}
+
+disable_service() {
+    check_service_is_stopped $1
+    if [[ $? -ne 0 ]];
+        then die "$1 service can not be stopped";
+    fi;
+}
+
+die() {
+  # $1: message to prompt before exiting
+  echo -e "**ERROR** $1";
+  exit 1
+}
+
+is_gerrit_really_running() {
+    return `ps -U $GERRIT_USER --no-headers -f | egrep -e '(java|daemon)' | grep -c . `
+}
+
+gerrit_force_stop() {
+    is_gerrit_really_running
+    if [ $? -ne 0 ]; then
+        killall -u ${GERRIT_USER} java
+    fi
+}
+
+gerrit_start() {
+    if get_daemon_status;
+        then return 1;
+    fi
+
+    ${GERRIT_SH} start > /dev/null 2>&1
+    return $?
+}
+
+gerrit_stop() {
+    ${GERRIT_SH} stop > /dev/null 2>&1
+    # Take a deep breath, to let the process terminate properly
+    for n in 1 2 3 4; do
+        sleep 1
+        get_daemon_status || break
+    done
+    if get_daemon_status; then
+         gerrit_force_stop
+    fi
+
+    # Do not trust daemons, enforce pidfiles removal in case they forget to cleanup when they exit.
+    rm -f $PIDFILE
+    return 0
+}
+
+clean_gerrit_tmp() {
+    rm -rf $TMPFILE
+}
+
+# Start the Gerrit service
+start() {
+    clean_gerrit_tmp
+    enable_service httpd
+    gerrit_start
+    echo -e "Starting $DESC                                [ \033[32m OK \033[m ]"
+}
+
+stop() {
+    disable_service httpd
+    gerrit_stop
+    echo -e "Stopping $DESC                                [ \033[32m OK \033[m ]"
+}
+
+status() {
+    get_daemon_status
+    case "$?" in
+        0)
+            echo "$DESC is running with the pid `cat $PIDFILE`"
+        ;;
+        *)
+            is_gerrit_really_running
+            procs=$?
+            if [ $procs -eq 0 ]; then
+                echo -n "$DESC is stopped"
+                if [ -f $PIDFILE ]; then
+                    echo ", but the pidfile ($PIDFILE) still exists..."
+                else
+                    echo
+                fi
+            else
+                echo "$procs instances of gerrit are running"
+                echo " but the pidfile $PIDFILE is missing"
+            fi
+        ;;
+
+    esac
+ control_service httpd status;
+}
+
+### main logic ###
+case "$1" in
+  start)
+        start
+        ;;
+  stop)
+        stop
+        ;;
+  status)
+        status
+        ;;
+  restart|reload|condrestart)
+        stop
+        start
+        ;;
+  *)
+        echo $"Usage: $0 {start|stop|restart|reload|status}"
+        exit 1
+esac
+exit 0
+
